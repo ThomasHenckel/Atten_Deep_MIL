@@ -7,26 +7,25 @@ https://128.84.21.199/pdf/1802.04712.pdf
 *---- Jiawen Yao--------------*
 '''
 
-
 import numpy as np
 import time
 from utl import Cell_Net
 from random import shuffle
 import argparse
-from keras.models import Model
-from utl.dataset import load_dataset
-from utl.data_aug_op import random_flip_img, random_rotate_img
-import glob
-import scipy.misc as sci
-import tensorflow as tf
 
-from keras import backend as K
-from keras.utils import multi_gpu_model
+from utl.dataset import load_dataset
+
+import glob
+
+from utl.DataGenerator import DataGenerator
+
 from keras.callbacks import ModelCheckpoint, LearningRateScheduler, TensorBoard, EarlyStopping
+from keras.preprocessing.image import array_to_img, img_to_array, load_img
 
 import matplotlib.pyplot as plt
 
 import os
+
 
 def parse_args():
     """Parse input arguments.
@@ -51,10 +50,15 @@ def parse_args():
     parser.add_argument('--epoch', dest='max_epoch',
                         help='number of epoch to train',
                         default=100, type=int)
+    parser.add_argument('--nfolds', dest='nfolds',
+                        help='number of epoch to train',
+                        default=10, type=int)
     parser.add_argument('--useGated', dest='useGated',
                         help='use Gated Attention',
                         default=False, type=int)
-
+    parser.add_argument('--dataPath', dest='dataPath',
+                        help='path to the image data',
+                        default='Data/Patches', type=str)
     # if len(sys.argv) == 1:
     #     parser.print_help()
     #     sys.exit(1)
@@ -62,29 +66,31 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def generate_batch(path):
+
+def generate_batch(path, input_dim):
     bags = []
     for each_path in path:
         name_img = []
         img = []
-        img_path = glob.glob(each_path + '/*.bmp')
+        img_path = glob.glob(each_path + '/*.*')
         num_ins = len(img_path)
-
+        each_path = each_path.replace('\\', '/')  # support for ms windows paths
         label = int(each_path.split('/')[-2])
 
         if label == 1:
-            curr_label = np.ones(num_ins,dtype=np.uint8)
+            curr_label = np.ones(num_ins, dtype=np.uint8)
         else:
             curr_label = np.zeros(num_ins, dtype=np.uint8)
         for each_img in img_path:
-            img_data = np.asarray(sci.imread(each_img), dtype=np.float32)
-            #img_data -= 255
-            img_data[:, :, 0] -= 123.68
-            img_data[:, :, 1] -= 116.779
-            img_data[:, :, 2] -= 103.939
-            img_data /= 255
+            img_raw = load_img(each_img, target_size=(input_dim[0], input_dim[1]))  # this is a PIL image
+            img_data = img_to_array(img_raw) / 255  # this is a Numpy array with shape (3, 256, 256)
+            # img_data -= 255
+            # img_data[:, :, 0] -= 123.68
+            # img_data[:, :, 1] -= 116.779
+            # img_data[:, :, 2] -= 103.939
+            # img_data /= 255
             # sci.imshow(img_data)
-            img.append(np.expand_dims(img_data,0))
+            img.append(np.expand_dims(img_data, 0))
             name_img.append(each_img.split('/')[-1])
         stack_img = np.concatenate(img, axis=0)
         bags.append((stack_img, curr_label, name_img))
@@ -99,11 +105,10 @@ def Get_train_valid_Path(Train_set, train_percentage=0.8):
     :param train_percentage:
     :return:
     """
-    import random
     indexes = np.arange(len(Train_set))
-    random.shuffle(indexes)
+    shuffle(indexes)
 
-    num_train = int(train_percentage*len(Train_set))
+    num_train = int(train_percentage * len(Train_set))
     train_index, test_index = np.asarray(indexes[:num_train]), np.asarray(indexes[num_train:])
 
     Model_Train = [Train_set[i] for i in train_index]
@@ -136,6 +141,7 @@ def test_eval(model, test_set):
         test_acc[ibatch] = result[1]
     return np.mean(test_loss), np.mean(test_acc)
 
+
 def train_eval(model, train_set, irun, ifold):
     """Evaluate on training set. Use Keras fit_generator
     Parameters
@@ -151,9 +157,11 @@ def train_eval(model, train_set, irun, ifold):
     batch_size = 1
     model_train_set, model_val_set = Get_train_valid_Path(train_set, train_percentage=0.9)
 
-    from utl.DataGenerator import DataGenerator
     train_gen = DataGenerator(batch_size=1, shuffle=True).generate(model_train_set)
     val_gen = DataGenerator(batch_size=1, shuffle=False).generate(model_val_set)
+
+    if not os.path.exists('Saved_model'):
+        os.makedirs('Saved_model')
 
     model_name = "Saved_model/" + "_Batch_size_" + str(batch_size) + "epoch_" + "best.hd5"
 
@@ -165,15 +173,18 @@ def train_eval(model, train_set, irun, ifold):
 
     callbacks = [checkpoint_fixed_name, EarlyStop]
 
-    history = model.fit_generator(generator=train_gen, steps_per_epoch=len(model_train_set)//batch_size,
-                                             epochs=args.max_epoch, validation_data=val_gen,
-                                            validation_steps=len(model_val_set)//batch_size, callbacks=callbacks)
+    history = model.fit_generator(generator=train_gen, steps_per_epoch=len(model_train_set) // batch_size,
+                                  epochs=args.max_epoch, validation_data=val_gen,
+                                  validation_steps=len(model_val_set) // batch_size, callbacks=callbacks)
 
     train_loss = history.history['loss']
     val_loss = history.history['val_loss']
 
     train_acc = history.history['bag_accuracy']
     val_acc = history.history['val_bag_accuracy']
+
+    if not os.path.exists('Results'):
+        os.makedirs('Results')
 
     fig = plt.figure()
     plt.plot(train_loss)
@@ -182,31 +193,29 @@ def train_eval(model, train_set, irun, ifold):
     plt.ylabel('loss')
     plt.xlabel('epoch')
     plt.legend(['train', 'val'], loc='upper left')
-    save_fig_name = 'Results/' + str(irun) + '_' + str(ifold) + "_loss_batchsize_" + str(batch_size) + "_epoch"  + ".png"
+    save_fig_name = 'Results/' + str(irun) + '_' + str(ifold) + "_loss_batchsize_" + str(batch_size) + "_epoch" + ".png"
     fig.savefig(save_fig_name)
-
 
     fig = plt.figure()
     plt.plot(train_acc)
     plt.plot(val_acc)
-    plt.title('model loss')
-    plt.ylabel('loss')
+    plt.title('model acc')
+    plt.ylabel('acc')
     plt.xlabel('epoch')
     plt.legend(['train', 'val'], loc='upper left')
-    save_fig_name = 'Results/' + str(irun) + '_' + str(ifold) + "_val_batchsize_" + str(batch_size) + "_epoch"  + ".png"
+    save_fig_name = 'Results/' + str(irun) + '_' + str(ifold) + "_val_batchsize_" + str(batch_size) + "_epoch" + ".png"
     fig.savefig(save_fig_name)
 
     return model_name
 
 
 def model_training(input_dim, dataset, irun, ifold):
-
     train_bags = dataset['train']
     test_bags = dataset['test']
 
     # convert bag to batch
-    train_set = generate_batch(train_bags)
-    test_set = generate_batch(test_bags)
+    train_set = generate_batch(train_bags, input_dim)
+    test_set = generate_batch(test_bags, input_dim)
 
     model = Cell_Net.cell_net(input_dim, args, useMulGpu=False)
 
@@ -224,32 +233,30 @@ def model_training(input_dim, dataset, irun, ifold):
     t2 = time.time()
     #
 
-    print ('run time:', (t2 - t1) / 60.0, 'min')
-    print ('test_acc={:.3f}'.format(test_acc))
+    print('run time:', (t2 - t1) / 60.0, 'min')
+    print('test_acc={:.3f}'.format(test_acc))
 
     return test_acc
-
 
 
 if __name__ == "__main__":
 
     args = parse_args()
 
-    print ('Called with args:')
-    print (args)
+    print('Called with args:')
+    print(args)
 
-    input_dim = (27,27,3)
+    input_dim = (27, 27, 3)
 
     run = 1
-    n_folds = 10
+    n_folds = args.nfolds
     acc = np.zeros((run, n_folds), dtype=float)
-    data_path = '../data/Patches'
+    data_path = args.dataPath  # '../data/Patches'
 
     for irun in range(run):
         dataset = load_dataset(dataset_path=data_path, n_folds=n_folds, rand_state=irun)
         for ifold in range(n_folds):
-            print ('run=', irun, '  fold=', ifold)
+            print('run=', irun, '  fold=', ifold)
             acc[irun][ifold] = model_training(input_dim, dataset[ifold], irun, ifold)
-    print ('mi-net mean accuracy = ', np.mean(acc))
-    print ('std = ', np.std(acc))
-
+    print('mi-net mean accuracy = ', np.mean(acc))
+    print('std = ', np.std(acc))

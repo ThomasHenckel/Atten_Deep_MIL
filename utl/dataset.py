@@ -1,4 +1,3 @@
-import numpy as np
 import glob
 from sklearn.model_selection import KFold
 

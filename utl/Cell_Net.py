@@ -1,10 +1,3 @@
-import sys
-import time
-from random import shuffle
-import numpy as np
-import argparse
-import tensorflow as tf
-
 from keras.utils import multi_gpu_model
 from keras.models import Model
 from keras.optimizers import SGD,Adam
